@@ -739,7 +739,8 @@ def unproject_cv(
     transform = intrinsics @ extrinsics if extrinsics is not None else intrinsics
     points = np.concatenate([uv, np.ones((*uv.shape[:-1], 1), dtype=uv.dtype)], axis=-1) * depth[..., None]
     points = np.concatenate([points, np.ones((*points.shape[:-1], 1), dtype=uv.dtype)], axis=-1)
-    points = points @ np.linalg.inv(transform).swapaxes(-2, -1)
+    inv_trans = np.linalg.inv(transform)
+    points = np.einsum('ij,...j->...i', inv_trans, points)
     points = points[..., :3]
     return points
 
