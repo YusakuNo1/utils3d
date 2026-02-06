@@ -655,9 +655,9 @@ def project_cv(
         [np.broadcast_to(np.array([0, 0, 0, 1], dtype=intrinsics.dtype), (*intrinsics.shape[:-2], 1, 4))]
     ])
     transform = intrinsics @ extrinsics if extrinsics is not None else intrinsics
-    points = points @ transform.swapaxes(-2, -1)
-    uv_coord = points[..., :2] / points[..., 2:3]
-    linear_depth = points[..., 2]
+    inv_trans = np.linalg.inv(transform)
+    orig_shape = points.shape
+    points = (points.reshape(-1, orig_shape[-1]) @ inv_trans.T).reshape(orig_shape)
     return uv_coord, linear_depth
 
 
@@ -687,7 +687,9 @@ def unproject_gl(
         @ np.concatenate([view_z[..., None, None], np.ones_like(view_z[..., None, None])], axis=-2))
     points = np.concatenate([clip_xy.squeeze(-1), view_z[..., None], np.ones_like(view_z)[..., None]], axis=-1)
     if view is not None:
-        points = points @ np.linalg.inv(view).swapaxes(-2, -1)
+    inv_trans = np.linalg.inv(transform)
+    orig_shape = points.shape
+    points = (points.reshape(-1, orig_shape[-1]) @ inv_trans.T).reshape(orig_shape)
     return points[..., :3]
 
 
@@ -740,8 +742,8 @@ def unproject_cv(
     points = np.concatenate([uv, np.ones((*uv.shape[:-1], 1), dtype=uv.dtype)], axis=-1) * depth[..., None]
     points = np.concatenate([points, np.ones((*points.shape[:-1], 1), dtype=uv.dtype)], axis=-1)
     inv_trans = np.linalg.inv(transform)
-    points = np.einsum('ij,...j->...i', inv_trans, points)
-    points = points[..., :3]
+    orig_shape = points.shape
+    points = (points.reshape(-1, orig_shape[-1]) @ inv_trans.T).reshape(orig_shape)
     return points
 
 
