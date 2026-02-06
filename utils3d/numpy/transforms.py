@@ -630,24 +630,35 @@ def project_gl(
 
 
 @no_warnings()
-def project_cv(points, extrinsics, intrinsics):
+def project_cv(
+    points: ndarray,
+    intrinsics: ndarray,
+    extrinsics: Optional[ndarray] = None,
+) -> Tuple[ndarray, ndarray]:
     """
-    自适应维度的 CV 投影函数 (修复 Batch 维度支持)
+    Project 3D points to 2D following the OpenCV convention
+
+    ## Parameters
+        points (ndarray): [..., N, 3]
+        extrinsics (ndarray): [..., 4, 4] extrinsics matrix
+        intrinsics (ndarray): [..., 3, 3] intrinsics matrix
+
+    ## Returns
+        uv_coord (ndarray): [..., N, 2] uv coordinates, value ranging in [0, 1].
+            The origin (0., 0.) is corresponding to the left & top
+        linear_depth (ndarray): [..., N] linear depth
     """
-    # 转换坐标系: P_cam = R @ P_world + t
-    # 统一展平处理 Batch
-    orig_shape = points.shape
-    pts_flat = points.reshape(-1, orig_shape[-1])
-    
-    # 变换到相机空间
-    # pts_cam = (pts_flat @ extrinsics[:3, :3].T) + extrinsics[:3, 3]
-    pts_cam = pts_flat @ extrinsics[:3, :4].T
-    
-    # 投影到像素空间
-    uv_homo = pts_cam @ intrinsics.T
-    uv = uv_homo[..., :2] / np.maximum(uv_homo[..., 2:3], 1e-8)
-    
-    return uv.reshape(orig_shape[:-1] + (2,))
+    assert intrinsics is not None, "intrinsics matrix is required"
+    points = np.concatenate([points, np.ones((*points.shape[:-1], 1), dtype=points.dtype)], axis=-1)
+    intrinsics = np.block([
+        [intrinsics, np.zeros((*intrinsics.shape[:-2], 3, 1), dtype=intrinsics.dtype)],
+        [np.broadcast_to(np.array([0, 0, 0, 1], dtype=intrinsics.dtype), (*intrinsics.shape[:-2], 1, 4))]
+    ])
+    transform = intrinsics @ extrinsics if extrinsics is not None else intrinsics
+    points = points @ transform.swapaxes(-2, -1)
+    uv_coord = points[..., :2] / points[..., 2:3]
+    linear_depth = points[..., 2]
+    return uv_coord, linear_depth
 
 
 def unproject_gl(
@@ -676,9 +687,7 @@ def unproject_gl(
         @ np.concatenate([view_z[..., None, None], np.ones_like(view_z[..., None, None])], axis=-2))
     points = np.concatenate([clip_xy.squeeze(-1), view_z[..., None], np.ones_like(view_z)[..., None]], axis=-1)
     if view is not None:
-    inv_trans = np.linalg.inv(transform)
-    orig_shape = points.shape
-    points = (points.reshape(-1, orig_shape[-1]) @ inv_trans.T).reshape(orig_shape)
+        points = points @ np.linalg.inv(view).swapaxes(-2, -1)
     return points[..., :3]
 
 
@@ -704,41 +713,36 @@ def screen_coord_to_view_coord(screen_coord: ndarray, projection: ndarray) -> nd
 
 
 @batched(2, 1, 2, 2)
-def unproject_cv(uv, depth, extrinsics, intrinsics):
+def unproject_cv(
+    uv: ndarray,
+    depth: ndarray,
+    intrinsics: ndarray,
+    extrinsics: ndarray = None,
+) -> ndarray:
     """
-    全自动修复版: 支持任意维度、防溢出、防 AttributeError
+    Unproject uv coordinates to 3D view space following the OpenCV convention
+
+    ## Parameters
+        uv (ndarray): [..., N, 2] uv coordinates, value ranging in [0, 1].
+            The origin (0., 0.) is corresponding to the left & top
+        depth (ndarray): [..., N] depth value
+        extrinsics (ndarray): [..., 4, 4] extrinsics matrix
+        intrinsics (ndarray): [..., 3, 3] intrinsics matrix
+
+    ## Returns
+        points (ndarray): [..., N, 3] 3d points
     """
-    # 计算逆变换矩阵
-    transform = intrinsics @ extrinsics[:3, :4]
-    # 补充齐次坐标列 [0, 0, 0, 1] 使其变为 4x4
-    full_transform = np.eye(4)
-    full_transform[:3, :4] = transform
-    inv_trans = np.linalg.inv(full_transform)
-    
-    # 构造齐次坐标 uv1d (u, v, 1, 1/depth)
-    u, v = uv[..., 0], uv[..., 1]
-    # 这种构造方式支持任意形状的 depth
-    ones = np.ones_like(depth)
-    points = np.stack([u * depth, v * depth, depth, ones], axis=-1)
-    
-    # 核心修复: 鲁棒的矩阵乘法处理
-    orig_shape = points.shape
-    # 使用 inv_trans[:3, :4] 处理投影，或直接用 4x4 处理齐次坐标
-    # 我们直接对 4x4 进行变换以确保平移正确
-    points = (points.reshape(-1, 4) @ inv_trans.T).reshape(orig_shape)
-    
-    return points[..., :3]
+    intrinsics = np.block([
+        [intrinsics, np.zeros((*intrinsics.shape[:-2], 3, 1), dtype=intrinsics.dtype)],
+        [np.broadcast_to(np.array([0, 0, 0, 1], dtype=intrinsics.dtype), (*intrinsics.shape[:-2], 1, 4))]
+    ])
+    transform = intrinsics @ extrinsics if extrinsics is not None else intrinsics
+    points = np.concatenate([uv, np.ones((*uv.shape[:-1], 1), dtype=uv.dtype)], axis=-1) * depth[..., None]
+    points = np.concatenate([points, np.ones((*points.shape[:-1], 1), dtype=uv.dtype)], axis=-1)
+    points = points @ np.linalg.inv(transform).swapaxes(-2, -1)
+    points = points[..., :3]
+    return points
 
-
-def directions_to_spherical_uv(directions):
-    norm = np.maximum(np.linalg.norm(directions, axis=-1, keepdims=True), 1e-8)
-    directions = directions / norm
-    x, y, z = directions[..., 0], directions[..., 1], directions[..., 2]
-    theta = np.arctan2(x, z)
-    phi = np.arcsin(np.clip(y, -1.0, 1.0))
-    u = (theta + np.pi) / (2 * np.pi)
-    v = (phi + np.pi / 2) / np.pi
-    return np.stack([u, v], axis=-1)
 
 
 def project(
